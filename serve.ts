@@ -1,7 +1,9 @@
-// A tiny static server for game/ (Node 22, standard library only), so an entry can be played
+// A tiny static server for game/ (Node 22, standard library only), so the game can be played
 // locally without a build step: `node serve.ts` serves game/ on http://localhost:8080.
-// It sends the MIME types a browser game needs, refuses any path outside game/, and otherwise
-// does nothing clever: this is a development convenience, not a web server for the internet.
+// --port and --host pick where it listens. It sends the MIME types a browser game needs,
+// refuses any path outside game/, and otherwise does nothing clever: this is a development
+// convenience, not a web server for the internet.
+
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -9,9 +11,14 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('./game', import.meta.url)));
 const args = process.argv.slice(2);
-const portIndex = args.indexOf('--port');
-const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
-const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
+
+function flagValue(name: string, fallback: string): string {
+  const index = args.indexOf(name);
+  return index === -1 || index + 1 >= args.length ? fallback : args[index + 1];
+}
+
+const port = Math.max(1, Math.min(65535, Number(flagValue('--port', '8080')) || 8080));
+const host = flagValue('--host', '0.0.0.0');
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -27,9 +34,6 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
-  '.glb': 'model/gltf-binary',
-  '.gltf': 'model/gltf+json',
-  '.bin': 'application/octet-stream',
   '.wasm': 'application/wasm',
   '.wav': 'audio/wav',
   '.mp3': 'audio/mpeg',
@@ -67,6 +71,6 @@ createServer((request, response) => {
     'cache-control': 'no-store',
   });
   createReadStream(file).pipe(response);
-}).listen(port, '127.0.0.1', () => {
-  console.log(`game/ is on http://localhost:${port}`);
+}).listen(port, host, () => {
+  console.log(`game/ is on http://${host}:${port}`);
 });

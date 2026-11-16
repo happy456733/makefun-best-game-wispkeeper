@@ -1,79 +1,109 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The screenshot scenes behind ?shot=start|play|end|win. Each one plays the real rules
+// forward from a fresh world, steered by the autopilot, so the frame is what a real game
+// looks like and the same seed always gives the same frame. The play and win scenes retry
+// with later seeds until the pilot survives, so the shot always shows its screen.
 
-const START_SECONDS = 5;
+import { STEP } from './config.js';
+import { createRandom } from './random.js';
+import { createAutopilot } from './autopilot.js';
+import {
+  createWorld, EVENT_BLOOM, EVENT_FLARE, EVENT_OVER, EVENT_SHARD, EVENT_WIN,
+} from './world.js';
+import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN } from './render.js';
+
+const START_SECONDS = 4;
 const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+const LIMIT_SECONDS = 900;
+const MAX_TRIES = 8;
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
+/** Run the world forward, feeding the particle system as the real loop would. */
+function runFor(world, pilot, particles, seconds) {
+  const steps = Math.floor(seconds / STEP);
+  for (let index = 0; index < steps; index += 1) {
+    const input = pilot ? pilot.decide(world.state) : { mx: 0, my: 0, flare: false };
+    const events = world.step(STEP, input, false);
+    const p = world.state.player;
+    if (events & EVENT_SHARD) particles.burst(p.x, p.y, '#ffd97a', 10, 180);
+    if (events & EVENT_BLOOM) particles.burst(p.x, p.y, '#6fe3c1', 16, 240);
+    if (events & EVENT_FLARE) particles.ring(p.x, p.y, '#ffe9a8');
+    if (index % 3 === 0) particles.trail(p.x, p.y, '#ffe9a8');
+    particles.update(STEP);
+    if (events & EVENT_OVER) return 'over';
+    if (events & EVENT_WIN) return 'win';
   }
-  return Infinity;
+  return 'time';
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
+function tryPlay(seed, particles) {
+  for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
+    const world = createWorld(createRandom(seed + attempt));
+    particles.clear();
+    const outcome = runFor(world, createAutopilot('careful'), particles, PLAY_SECONDS);
+    if (outcome === 'time' && world.state.score > 200) {
+      return { world, screen: SCREEN_PLAY, best: world.state.score };
     }
   }
-  return best;
+  // Fallback: the first attempt's world, whatever became of it.
+  const world = createWorld(createRandom(seed));
+  particles.clear();
+  runFor(world, createAutopilot('careful'), particles, PLAY_SECONDS);
+  return {
+    world,
+    screen: world.state.over ? SCREEN_OVER : SCREEN_PLAY,
+    best: world.state.score,
+  };
+}
+
+function tryWin(seed, particles) {
+  for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
+    const world = createWorld(createRandom(seed + attempt));
+    particles.clear();
+    const outcome = runFor(world, createAutopilot('careful'), particles, LIMIT_SECONDS);
+    if (outcome === 'win') {
+      return { world, screen: SCREEN_WIN, best: world.state.score };
+    }
+  }
+  const world = createWorld(createRandom(seed));
+  particles.clear();
+  runFor(world, createAutopilot('careful'), particles, LIMIT_SECONDS);
+  return {
+    world,
+    screen: world.state.won ? SCREEN_WIN : SCREEN_OVER,
+    best: world.state.score,
+  };
+}
+
+function tryEnd(seed, particles) {
+  // A hurried run that gets somewhere, then stops and lets the dark take the wisp.
+  for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
+    const world = createWorld(createRandom(seed + attempt));
+    particles.clear();
+    const outcome = runFor(world, createAutopilot('reckless'), particles, 30);
+    if (outcome === 'win') continue;
+    if (outcome === 'over') return { world, screen: SCREEN_OVER, best: world.state.score };
+    const idle = runFor(world, null, particles, LIMIT_SECONDS);
+    if (idle === 'over') return { world, screen: SCREEN_OVER, best: world.state.score };
+  }
+  const world = createWorld(createRandom(seed));
+  particles.clear();
+  runFor(world, null, particles, LIMIT_SECONDS);
+  return { world, screen: SCREEN_OVER, best: world.state.score };
 }
 
 /**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
+ * Stage the named scene (start, play, end or win; any other name is start) and return the
+ * world to draw, the screen to draw over it and the best score to show.
  */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export function stageShot(name, seed, particles) {
+  if (name === 'play') return tryPlay(seed, particles);
+  if (name === 'win') return tryWin(seed, particles);
+  if (name === 'end') return tryEnd(seed, particles);
+  const world = createWorld(createRandom(seed));
+  particles.clear();
+  for (let index = 0; index < START_SECONDS / STEP; index += 1) {
+    world.step(STEP, null, true);
+    if (index % 4 === 0) particles.trail(world.state.player.x, world.state.player.y, '#ffe9a8');
+    particles.update(STEP);
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  return { world, screen: SCREEN_TITLE, best: 0 };
 }

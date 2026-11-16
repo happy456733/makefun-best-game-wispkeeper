@@ -10,3 +10,8 @@ export function createRandom(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/** A random number in [min, max). */
+export function range(random, min, max) {
+  return min + random() * (max - min);
+}
